@@ -24,7 +24,6 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/pkg/errors"
 
@@ -33,10 +32,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var disableWatcher bool
 var containerName string
 var depsVolumeName string
 var ports []string
 var publishAllPorts bool
+var interactive bool
 var dockerNetwork string
 var dockerOptions string
 var nameFlags *flag.FlagSet
@@ -44,7 +45,8 @@ var commonFlags *flag.FlagSet
 
 func checkDockerRunOptions(options []string) error {
 	fmt.Println("testing docker options", options)
-	runOptionsTest := "(^((-p)|(--publish)|(--publish-all)|(-P)|(-u)|(--user)|(--name)|(--network)|(-t)|(--tty)|(--rm)|(--entrypoint)|(-v)|(--volume)|(-e)|(--env))(=?$)|(=.*))"
+	//runOptionsTest := "(^((-p)|(--publish)|(--publish-all)|(-P)|(-u)|(--user)|(--name)|(--network)|(-t)|(--tty)|(--rm)|(--entrypoint)|(-v)|(--volume)|(-e)|(--env))((=?$)|(=.*)))"
+	runOptionsTest := "(^((--help)|(-p)|(--publish)|(--publish-all)|(-P)|(-u)|(--user)|(--name)|(--network)|(-t)|(--tty)|(--rm)|(--entrypoint)|(-v)|(--volume))((=?$)|(=.*)))"
 
 	blackListedRunOptionsRegexp := regexp.MustCompile(runOptionsTest)
 	for _, value := range options {
@@ -85,7 +87,9 @@ func buildCommonFlags() {
 		commonFlags.StringVar(&depsVolumeName, "deps-volume", defaultDepsVolume, "Docker volume to use for dependencies. Mounts to APPSODY_DEPS dir.")
 		commonFlags.StringArrayVarP(&ports, "publish", "p", nil, "Publish the container's ports to the host. The stack's exposed ports will always be published, but you can publish addition ports or override the host ports with this option.")
 		commonFlags.BoolVarP(&publishAllPorts, "publish-all", "P", false, "Publish all exposed ports to random ports")
-		commonFlags.StringVar(&dockerOptions, "docker-options", "", "Specify the docker options to use.  Value must be in \"\".")
+		commonFlags.BoolVar(&disableWatcher, "no-watcher", false, "Disable file watching, regardless of container environment variable settings.")
+		commonFlags.BoolVarP(&interactive, "interactive", "i", false, "Attach STDIN to the container for interactive TTY mode")
+		commonFlags.StringVar(&dockerOptions, "docker-options", "", "Specify the docker run options to use.  Value must be in \"\".")
 	}
 
 }
@@ -129,9 +133,9 @@ func commonCmd(cmd *cobra.Command, args []string, mode string) error {
 	Debug.log("Project directory: ", projectDir)
 
 	var cmdArgs []string
-	dockerPullErr := dockerPullImage(platformDefinition)
-	if dockerPullErr != nil {
-		return dockerPullErr
+	pullErr := pullImage(platformDefinition)
+	if pullErr != nil {
+		return pullErr
 	}
 
 	volumeMaps, volumeErr := getVolumeArgs()
@@ -139,7 +143,7 @@ func commonCmd(cmd *cobra.Command, args []string, mode string) error {
 		return volumeErr
 	}
 	// Mount the APPSODY_DEPS cache volume if it exists
-	depsEnvVar, envErr := getEnvVar("APPSODY_DEPS")
+	depsEnvVar, envErr := GetEnvVar("APPSODY_DEPS")
 	if envErr != nil {
 		return envErr
 	}
@@ -167,7 +171,7 @@ func commonCmd(cmd *cobra.Command, args []string, mode string) error {
 		if err != nil {
 			return errors.New("fatal error - can't retrieve the binary path... exiting")
 		}
-		controllerExists, existsErr := exists(destController)
+		controllerExists, existsErr := Exists(destController)
 		if existsErr != nil {
 			return existsErr
 		}
@@ -175,10 +179,21 @@ func commonCmd(cmd *cobra.Command, args []string, mode string) error {
 		checksumMatch := false
 		if controllerExists {
 			var checksumMatchErr error
-			checksumMatch, checksumMatchErr = checksum256TestFile(filepath.Join(binaryLocation, "appsody-controller"), destController)
-			Debug.log("checksum returned: ", controllerExists)
-			if checksumMatchErr != nil {
-				return checksumMatchErr
+			binaryControllerPath := filepath.Join(binaryLocation, "appsody-controller")
+			binaryControllerExists, existsErr := Exists(binaryControllerPath)
+			if existsErr != nil {
+				return existsErr
+			}
+			if binaryControllerExists {
+				checksumMatch, checksumMatchErr = checksum256TestFile(binaryControllerPath, destController)
+				Debug.log("checksum returned: ", checksumMatch)
+				if checksumMatchErr != nil {
+					return checksumMatchErr
+				}
+			} else {
+				//the binary controller did not exist so skip copying it
+				Warning.log("The binary controller could not be found.")
+				checksumMatch = true
 			}
 		}
 		// if the controller doesn't exist
@@ -217,8 +232,7 @@ func commonCmd(cmd *cobra.Command, args []string, mode string) error {
 		if err != nil {
 			Error.log(err)
 		}
-		//dockerRemove(containerName) is not needed due to --rm flag
-		os.Exit(1)
+		//containerRemove(containerName) is not needed due to --rm flag
 	}()
 
 	cmdArgs = []string{"--rm"}
@@ -258,7 +272,16 @@ func commonCmd(cmd *cobra.Command, args []string, mode string) error {
 		}
 		cmdArgs = append(cmdArgs, dockerOptionsCmd...)
 	}
+	if interactive {
+		cmdArgs = append(cmdArgs, "-i")
+	}
 	cmdArgs = append(cmdArgs, "-t", "--entrypoint", "/appsody/appsody-controller", platformDefinition, "--mode="+mode)
+	if verbose {
+		cmdArgs = append(cmdArgs, "-v")
+	}
+	if disableWatcher {
+		cmdArgs = append(cmdArgs, "--no-watcher")
+	}
 	Debug.logf("Attempting to start image %s with container name %s", platformDefinition, containerName)
 	execCmd, err := DockerRunAndListen(cmdArgs, Container)
 	if dryrun {
@@ -274,14 +297,14 @@ func commonCmd(cmd *cobra.Command, args []string, mode string) error {
 		error := fmt.Sprintf("%s", err)
 		//Linux and Windows return a different error on Ctrl-C
 		if error == "signal: interrupt" || error == "exit status 2" {
-			Info.log("Closing down development environment, sleeping 60 seconds: ", error)
-
-			time.Sleep(60 * time.Second)
+			Info.log("Closing down, development environment was interrupted.")
 		} else {
-			return errors.Errorf("Error waiting in 'appsody %s' %s", mode, error)
+			return errors.Errorf("Error in 'appsody %s': %s", mode, error)
 
 		}
 
+	} else {
+		Info.log("Closing down development environment.")
 	}
 	return nil
 
@@ -298,7 +321,7 @@ func processPorts(cmdArgs []string) ([]string, error) {
 	Debug.log("Exposed ports provided by the docker file", dockerExposedPorts)
 	// if the container port is not in the lised of exposed ports add it to the list
 
-	containerPort, envErr := getEnvVar("PORT")
+	containerPort, envErr := GetEnvVar("PORT")
 	if envErr != nil {
 		return cmdArgs, envErr
 	}

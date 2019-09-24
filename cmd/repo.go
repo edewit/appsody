@@ -40,6 +40,7 @@ type Stack struct {
 	ID          string
 	Version     string
 	Description string
+	Templates   string
 }
 
 type RepoIndex struct {
@@ -86,6 +87,39 @@ type RepositoryEntry struct {
 type Template struct {
 	ID  string `yaml:"id"`
 	URL string `yaml:"url"`
+}
+
+func findTemplateURL(projectVersion ProjectVersion, templateName string) string {
+	templates := projectVersion.Templates
+
+	for _, value := range templates {
+		if value.ID == templateName {
+			return value.URL
+		}
+
+	}
+	return ""
+}
+
+type indexError struct {
+	indexName string
+	theError  error
+}
+
+type indexErrors struct {
+	listOfErrors []indexError
+}
+
+func (e indexError) Error() string {
+	return "- Repository: " + e.indexName + "\n  Reason: " + e.theError.Error()
+}
+
+func (e indexErrors) Error() string {
+	var myerrors string
+	for _, err := range e.listOfErrors {
+		myerrors = myerrors + fmt.Sprintf("%v\n", err)
+	}
+	return myerrors
 }
 
 var unsupportedRepos []string
@@ -243,7 +277,7 @@ func downloadFile(href string, writer io.Writer) error {
 			Debug.logf("Contents http response:\n%s", buf)
 		}
 		resp.Body.Close()
-		return fmt.Errorf("%s response trying to download %s", resp.Status, href)
+		return fmt.Errorf("Could not download %s: %s", href, resp.Status)
 	}
 
 	_, err = io.Copy(writer, resp.Body)
@@ -259,7 +293,7 @@ func downloadIndex(url string) (*RepoIndex, error) {
 	indexBuffer := bytes.NewBuffer(nil)
 	err := downloadFile(url, indexBuffer)
 	if err != nil {
-		return nil, errors.Errorf("Failed to get repository index: %s", err)
+		return nil, err
 	}
 
 	yamlFile, err := ioutil.ReadAll(indexBuffer)
@@ -284,8 +318,7 @@ func (index *RepoIndex) listProjects(repoName string) (string, error) {
 		Debug.log("Adding unsupported repoistory", repoName)
 		unsupportedRepos = append(unsupportedRepos, repoName)
 	}
-	//table.AddRow("REPO", "ID", "VERSION", "TEMPLATES", "DESCRIPTION")
-	table.AddRow("REPO", "ID", "VERSION ", "DESCRIPTION")
+	table.AddRow("REPO", "ID", "VERSION  ", "TEMPLATES", "DESCRIPTION")
 
 	Stacks, err := index.buildStacksFromIndex(repoName, Stacks)
 	if err != nil {
@@ -293,17 +326,9 @@ func (index *RepoIndex) listProjects(repoName string) (string, error) {
 	}
 
 	for _, value := range Stacks {
-		table.AddRow(value.repoName, value.ID, value.Version, truncate(value.Description, 80))
-
+		table.AddRow(value.repoName, value.ID, value.Version, value.Templates, value.Description)
 	}
 	return table.String(), nil
-}
-func truncate(s string, i int) string {
-	desc := s
-	if len(s) > i {
-		desc = s[0:i] + "..."
-	}
-	return desc
 }
 func (r *RepositoryFile) listRepoProjects(repoName string) (string, error) {
 	if repo := r.GetRepo(repoName); repo != nil {
@@ -343,7 +368,7 @@ func (r *RepositoryFile) getRepos() (*RepositoryFile, error) {
 func (r *RepositoryFile) listRepos() (string, error) {
 	var entries = []RepositoryEntry{}
 	table := uitable.New()
-	table.MaxColWidth = 120
+	table.MaxColWidth = 1024
 	table.AddRow("NAME", "URL")
 	for _, value := range r.Repositories {
 		repoName := value.Name
@@ -473,28 +498,51 @@ func (r *RepositoryFile) WriteFile(path string) error {
 }
 
 func (r *RepositoryFile) GetIndices() (RepoIndices, error) {
-
 	indices := make(map[string]*RepoIndex)
+	brokenRepos := make([]indexError, 0)
 	for _, rf := range r.Repositories {
 		var index, err = downloadIndex(rf.URL)
 		if err != nil {
-			return indices, err
+			repoErr := indexError{rf.Name, err}
+			brokenRepos = append(brokenRepos, repoErr)
+		} else {
+			indices[rf.Name] = index
 		}
-		indices[rf.Name] = index
+	}
+	if len(brokenRepos) > 0 {
+		return indices, &indexErrors{brokenRepos}
 	}
 	return indices, nil
 }
+
 func (index *RepoIndex) buildStacksFromIndex(repoName string, Stacks []Stack) ([]Stack, error) {
 
 	for id, value := range index.Projects {
 
-		//	Stacks = append(Stacks, Stack{repoName, id, value[0].Version, value[0].Description, "*" + value[0].DefaultTemplate})
-		Stacks = append(Stacks, Stack{repoName, id, value[0].Version, value[0].Description})
-
+		Stacks = append(Stacks, Stack{repoName, id, value[0].Version, value[0].Description, "*" + value[0].DefaultTemplate})
 	}
 	for _, value := range index.Stacks {
-		Stacks = append(Stacks, Stack{repoName, value.ID, value.Version, value.Description})
+		Templates := value.Templates
 
+		templatesListString := ""
+		if value.Templates != nil {
+			sort.Slice(Templates, func(i, j int) bool { return Templates[i].ID < Templates[j].ID })
+
+			for _, template := range Templates {
+				defaultMarker := ""
+				if template.ID == value.DefaultTemplate {
+					defaultMarker = "*"
+				}
+				if templatesListString != "" {
+					templatesListString += ", " + defaultMarker + template.ID
+				} else {
+					templatesListString = defaultMarker + template.ID
+				}
+
+			}
+		}
+
+		Stacks = append(Stacks, Stack{repoName, value.ID, value.Version, value.Description, templatesListString})
 	}
 
 	sort.Slice(Stacks, func(i, j int) bool {
@@ -516,12 +564,12 @@ func (r *RepositoryFile) listProjects() (string, error) {
 	table := uitable.New()
 	table.MaxColWidth = 60
 	table.Wrap = true
-	table.AddRow("REPO", "ID", "VERSION ", "DESCRIPTION")
 
+	table.AddRow("REPO", "ID", "VERSION  ", "TEMPLATES", "DESCRIPTION")
 	indices, err := r.GetIndices()
 
 	if err != nil {
-		return "", errors.Errorf("Could not read indices: %v", err)
+		Error.logf("The following indices could not be read, skipping:\n%v", err)
 	}
 	if len(indices) != 0 {
 		for repoName, index := range indices {
@@ -542,9 +590,16 @@ func (r *RepositoryFile) listProjects() (string, error) {
 	} else {
 		return "", errors.New("there are no repositories in your configuration")
 	}
+	defaultRepoName, err := r.GetDefaultRepoName()
+	if err != nil {
+		return "", err
+	}
 	for _, value := range Stacks {
-		table.AddRow(value.repoName, value.ID, value.Version, truncate(value.Description, 80))
 
+		if value.repoName == defaultRepoName {
+			value.repoName = "*" + value.repoName
+		}
+		table.AddRow(value.repoName, value.ID, value.Version, value.Templates, value.Description)
 	}
 	return table.String(), nil
 }

@@ -21,6 +21,12 @@ import (
 )
 
 func TestList(t *testing.T) {
+
+	// tests that would have run before this and crashed could leave the repo
+	// in a bad state - mostly leading to: "a repo with this name already exists."
+	// so clean it up pro-actively, ignore any errors.
+	_, _ = cmdtest.RunAppsodyCmdExec([]string{"repo", "remove", "LocalTestRepo"}, ".")
+
 	// first add the test repo index
 	_, cleanup, err := cmdtest.AddLocalFileRepo("LocalTestRepo", "../cmd/testdata/index.yaml")
 	if err != nil {
@@ -48,6 +54,7 @@ func TestListV2(t *testing.T) {
 	var err error
 	var output string
 	var cleanup func()
+	_, _ = cmdtest.RunAppsodyCmdExec([]string{"repo", "remove", "incubatortest"}, ".")
 	_, cleanup, err = cmdtest.AddLocalFileRepo("incubatortest", "../cmd/testdata/kabanero.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -87,4 +94,20 @@ func TestListV2(t *testing.T) {
 		t.Error("Failed to flag non-existing repo")
 	}
 
+}
+
+func TestRepoJson(t *testing.T) {
+	args := []string{"list", "-o", "json"}
+	output, err := cmdtest.RunAppsodyCmdExec(args, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := cmdtest.ParseListJSON(cmdtest.ParseJSON(output))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list[0].ID != "java-microprofile" {
+		t.Error("list command should contain id 'java-microprofile'", list[0].ID, output)
+	}
 }

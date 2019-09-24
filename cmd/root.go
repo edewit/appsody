@@ -19,13 +19,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	// for logging
 	"k8s.io/klog"
-
-	//  homedir "github.com/mitchellh/go-homedir"
 
 	"github.com/mitchellh/go-homedir"
 	"github.com/pkg/errors"
@@ -45,6 +44,11 @@ var (
 	klogInitialized = false
 )
 
+// Regular expression to match ANSI terminal commands so that we can remove them from the log
+const ansi = "[\u001B\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[-a-zA-Z\\d\\/#&.:=?%@~_\\s]*)*)?(\u0007|^G))|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~]))"
+
+var ansiRegexp = regexp.MustCompile(ansi)
+
 func homeDir() (string, error) {
 	home, err := homedir.Dir()
 	if err != nil {
@@ -53,6 +57,8 @@ func homeDir() (string, error) {
 	}
 	return home, nil
 }
+
+var operatorHome = "https://github.com/appsody/appsody-operator/releases/latest/download"
 
 var rootCmd = &cobra.Command{
 	Use:           "appsody",
@@ -74,6 +80,9 @@ func setupConfig() error {
 	if err != nil {
 		return err
 	}
+
+	checkTime()
+	setNewIndexURL()
 	return nil
 }
 
@@ -123,7 +132,9 @@ func initConfig() error {
 	}
 	cliConfig.SetDefault("home", filepath.Join(homeDirectory, ".appsody"))
 	cliConfig.SetDefault("images", "index.docker.io")
+	cliConfig.SetDefault("operator", operatorHome)
 	cliConfig.SetDefault("tektonserver", "")
+	cliConfig.SetDefault("lastversioncheck", "none")
 	if cfgFile != "" {
 		// Use config file from the flag.
 		cliConfig.SetConfigFile(cfgFile)
@@ -174,15 +185,35 @@ var (
 
 func (l appsodylogger) log(args ...interface{}) {
 	msgString := fmt.Sprint(args...)
-	l.internalLog(msgString, args...)
+	l.internalLog(msgString, false, args...)
 }
 
 func (l appsodylogger) logf(fmtString string, args ...interface{}) {
 	msgString := fmt.Sprintf(fmtString, args...)
-	l.internalLog(msgString, args...)
+	l.internalLog(msgString, false, args...)
 }
 
-func (l appsodylogger) internalLog(msgString string, args ...interface{}) {
+func (l appsodylogger) Log(args ...interface{}) {
+	msgString := fmt.Sprint(args...)
+	l.internalLog(msgString, false, args...)
+}
+
+func (l appsodylogger) Logf(fmtString string, args ...interface{}) {
+	msgString := fmt.Sprintf(fmtString, args...)
+	l.internalLog(msgString, false, args...)
+}
+
+func (l appsodylogger) LogSkipConsole(args ...interface{}) {
+	msgString := fmt.Sprint(args...)
+	l.internalLog(msgString, true, args...)
+}
+
+func (l appsodylogger) LogfSkipConsole(fmtString string, args ...interface{}) {
+	msgString := fmt.Sprintf(fmtString, args...)
+	l.internalLog(msgString, true, args...)
+}
+
+func (l appsodylogger) internalLog(msgString string, skipConsole bool, args ...interface{}) {
 	if l == Debug && !verbose {
 		return
 	}
@@ -201,15 +232,21 @@ func (l appsodylogger) internalLog(msgString string, args ...interface{}) {
 		}
 	}
 
-	// Print to console
-	if l == Info {
-		fmt.Fprintln(os.Stdout, msgString)
-	} else {
-		fmt.Fprintln(os.Stderr, msgString)
+	if !skipConsole {
+		// Print to console
+		if l == Info {
+			fmt.Fprintln(os.Stdout, msgString)
+		} else if l == Container {
+			fmt.Fprint(os.Stdout, msgString)
+		} else {
+			fmt.Fprintln(os.Stderr, msgString)
+		}
 	}
 
 	// Print to log file
 	if verbose && klogInitialized {
+		// Remove ansi commands
+		msgString = ansiRegexp.ReplaceAllString(msgString, "")
 		klog.InfoDepth(2, msgString)
 		klog.Flush()
 	}

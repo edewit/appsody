@@ -50,3 +50,19 @@ func TestRepoList(t *testing.T) {
 
 	}
 }
+
+func TestRepoListJson(t *testing.T) {
+	args := []string{"repo", "list", "--config", "testdata/multiple_repository_config/config.yaml", "-o", "json"}
+	output, err := cmdtest.RunAppsodyCmdExec(args, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := cmdtest.ParseRepoListJSON(cmdtest.ParseJSON(output))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Repositories) != 2 {
+		t.Errorf("Expected 2 repos! CLI output:\n%s", output)
+	}
+}

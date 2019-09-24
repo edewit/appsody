@@ -24,7 +24,7 @@ import (
 )
 
 func checkDockerBuildOptions(options []string) error {
-	buildOptionsTest := "(^((-t)|(--tag)|(-f)|(--file))(=?$)|(=.*))"
+	buildOptionsTest := "(^((-t)|(--tag)|(-f)|(--file))((=?$)|(=.*)))"
 
 	blackListedBuildOptionsRegexp := regexp.MustCompile(buildOptionsTest)
 	for _, value := range options {
@@ -97,6 +97,6 @@ var buildCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(buildCmd)
 	buildCmd.PersistentFlags().StringVarP(&tag, "tag", "t", "", "Docker image name and optionally a tag in the 'name:tag' format")
-	buildCmd.PersistentFlags().StringVar(&dockerBuildOptions, "docker-options", "", "Additional options to be sent when running docker commands.  Value must be in \"\".")
+	buildCmd.PersistentFlags().StringVar(&dockerBuildOptions, "docker-options", "", "Specify the docker build options to use.  Value must be in \"\".")
 
 }
